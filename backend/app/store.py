@@ -8,15 +8,35 @@ from typing import Any
 
 from app.seed import SEED_ROWS
 
+# 内部账本：恢复路径引用、恢复清单与消费记录不是独立业务模块，只是恢复链路
+# 里的占用登记与处理记录，不参与模块清单与运营概览的统计。
+INTERNAL_MODULES = {
+    "restore_manifests",
+    "restore_paths",
+    "restore_rollbacks",
+    "restore_consumptions",
+}
+
 
 class Store:
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """恢复成冷启动时的示例数据，供本地联调和单测复用。"""
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
 
-    def module_names(self) -> list[str]:
-        return sorted(self._tables)
+    def module_names(self, *, include_internal: bool = False) -> list[str]:
+        names = sorted(self._tables)
+        if include_internal:
+            return names
+        return [name for name in names if name not in INTERNAL_MODULES]
+
+    def replace_rows(self, module: str, rows: list[dict[str, Any]]) -> None:
+        """整体替换一张表：用于恢复失败时把清单与路径引用一起退回。"""
+        self._tables[module] = rows
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])

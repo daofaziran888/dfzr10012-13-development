@@ -11,7 +11,10 @@ const columns = [
   "运行时长",
   "异常次数",
   "重启次数",
-  "实例状态"
+  "实例状态",
+  "检查点ID",
+  "保存路径",
+  "恢复锁"
 ]
 const actions = [
   "启动作业",
@@ -40,11 +43,15 @@ const stats = [
 ]
 
 type Row = Record<string, string | number | null>
+type Manifest = Record<string, string | number | null>
 
 export default function JobopsView() {
   const [rows, setRows] = useState<Row[]>([])
   const [total, setTotal] = useState(0)
   const [errorMessage, setErrorMessage] = useState('')
+  const [notice, setNotice] = useState('')
+  const [manifests, setManifests] = useState<Manifest[]>([])
+  const [consumptions, setConsumptions] = useState<Record<string, Manifest>>({})
   const [filters, setFilters] = useState<Record<string, string>>({})
   const filterFields = useMemo(() => columns.slice(0, 3), [])
 
@@ -64,23 +71,73 @@ export default function JobopsView() {
     }
   }, [filters])
 
+  const reloadManifests = useCallback(async () => {
+    try {
+      const response = await request(`${ENDPOINT}/manifests`)
+      if (!response.ok) {
+        throw new Error('恢复数据清单读取失败')
+      }
+      const payload = await response.json()
+      const items: Manifest[] = payload.items ?? []
+      setManifests(items)
+      const records: Record<string, Manifest> = {}
+      await Promise.all(items.map(async (manifest) => {
+        const lock = String(manifest['恢复锁'] ?? '')
+        if (!lock) return
+        const recordResponse = await request(`${ENDPOINT}/consumptions/${encodeURIComponent(lock)}`)
+        if (recordResponse.ok) {
+          records[lock] = await recordResponse.json()
+        }
+      }))
+      setConsumptions(records)
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '恢复数据清单读取失败')
+    }
+  }, [])
+
   useEffect(() => {
     void reload()
   }, [reload])
 
+  useEffect(() => {
+    void reloadManifests()
+  }, [reloadManifests])
+
   async function runAction(action: string, row: Row) {
     setErrorMessage('')
+    setNotice('')
     try {
       const response = await request(`${ENDPOINT}/${row.id}/actions`, {
         method: 'POST',
         body: JSON.stringify({ action }),
       })
-      if (!response.ok) {
-        throw new Error('流作业运维动作未生效，请稍后重试')
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok || payload.ok === false) {
+        throw new Error(String(payload.message ?? '流作业运维动作未生效，请稍后重试'))
       }
+      setNotice(String(payload.message ?? '作业实例已更新'))
       await reload()
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '流作业运维操作失败')
+    }
+  }
+
+  async function consumeManifest(manifest: Manifest) {
+    setErrorMessage('')
+    setNotice('')
+    const lock = String(manifest['恢复锁'] ?? '')
+    try {
+      const response = await request(`${ENDPOINT}/manifests/${encodeURIComponent(lock)}/consume`, {
+        method: 'POST',
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok || payload.ok === false) {
+        throw new Error(String(payload.message ?? '恢复清单接收失败'))
+      }
+      setNotice(String(payload.message ?? '恢复清单已接收'))
+      await Promise.all([reload(), reloadManifests()])
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '恢复清单接收失败')
     }
   }
 
@@ -153,8 +210,62 @@ export default function JobopsView() {
         </tbody>
       </table>
 
+      <header className="page-head">
+        <div>
+          <h3>恢复数据清单接收</h3>
+          <p className="page-desc">与检查点恢复读取同一份清单；接收后在作业准备侧维护自己的处理记录，重复接收返回同一条记录。</p>
+        </div>
+      </header>
+
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th>恢复锁</th>
+            <th>恢复请求号</th>
+            <th>检查点ID</th>
+            <th>目标实例</th>
+            <th>保存路径</th>
+            <th>恢复耗时</th>
+            <th>清单状态</th>
+            <th>消费状态</th>
+            <th>处理记录</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {manifests.map((manifest) => {
+            const lock = String(manifest['恢复锁'] ?? '')
+            const record = consumptions[lock]
+            return (
+              <tr key={lock}>
+                <td>{lock || '—'}</td>
+                <td>{manifest['恢复请求号'] ?? '—'}</td>
+                <td>{manifest['检查点ID'] ?? '—'}</td>
+                <td>{manifest['目标实例'] ?? '—'}</td>
+                <td>{manifest['保存路径'] ?? '—'}</td>
+                <td>{`${manifest['恢复耗时'] ?? '—'} ${manifest['恢复耗时单位'] ?? '秒'}`}</td>
+                <td>{manifest['状态'] ?? '—'}</td>
+                <td>{record?.['消费状态'] ?? '未接收'}</td>
+                <td>{record?.['处理记录'] ?? '—'}</td>
+                <td className="row-actions">
+                  <button className="link" type="button" onClick={() => void consumeManifest(manifest)}>
+                    {record ? '刷新消费记录' : '接收恢复清单'}
+                  </button>
+                </td>
+              </tr>
+            )
+          })}
+          {manifests.length === 0 && (
+            <tr>
+              <td className="empty-state" colSpan={10}>暂无恢复数据清单，请先在检查点恢复发起恢复</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+
       <footer className="page-foot">
         <span>共 {total} 条流作业运维记录</span>
+        {notice && <span>{notice}</span>}
         {errorMessage && <span className="error-text">{errorMessage}</span>}
       </footer>
     </section>
